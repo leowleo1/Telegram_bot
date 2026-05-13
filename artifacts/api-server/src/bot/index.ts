@@ -308,6 +308,10 @@ bot.on("text", async (ctx): Promise<void> => {
   }
 });
 
+bot.catch((err: unknown) => {
+  logger.error({ err }, "Telegram bot error (handled)");
+});
+
 function buildMiniBar(done: number, total: number): string {
   const filled = total > 0 ? Math.round((done / total) * 8) : 0;
   return "▓".repeat(filled) + "░".repeat(8 - filled);
