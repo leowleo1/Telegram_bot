@@ -1,5 +1,6 @@
 import app from "./app";
 import { logger } from "./lib/logger";
+import { bot, setupReminders } from "./bot/index";
 
 const rawPort = process.env["PORT"];
 
@@ -23,3 +24,15 @@ app.listen(port, (err) => {
 
   logger.info({ port }, "Server listening");
 });
+
+bot.launch()
+  .then(() => {
+    logger.info("Telegram bot started (long polling)");
+    setupReminders(bot);
+  })
+  .catch((err) => {
+    logger.error({ err }, "Failed to start Telegram bot");
+  });
+
+process.once("SIGINT", () => bot.stop("SIGINT"));
+process.once("SIGTERM", () => bot.stop("SIGTERM"));
