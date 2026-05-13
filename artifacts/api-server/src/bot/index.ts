@@ -13,6 +13,9 @@ import {
   setUserTimezone,
   setCycleStartDate,
   resetCycleToToday,
+  checkSupplementToday,
+  markSupplementTaken,
+  getSupplementStreak,
 } from "./db";
 import { formatCycleMessage } from "./ekstrajen";
 
@@ -160,17 +163,58 @@ bot.hears("📊 Streaks", async (ctx): Promise<void> => {
   await ctx.reply(`📊 *Streaks*\n\n${lines.join("\n\n")}`, { parse_mode: "Markdown" });
 });
 
-bot.hears("💊 Daily Supplement", async (ctx): Promise<void> => {
-  const id = String(ctx.from.id);
-  const user = await getUser(id);
+async function sendSupplementStatus(ctx: any, telegramId: string): Promise<void> {
+  const user = await getUser(telegramId);
   if (!user?.ekstrajenStartDate) {
     await ctx.reply(
       "I don't have your cycle start date yet.\n\nTap ⚙️ Settings → Set Cycle Start Date to set when you started your course.",
     );
     return;
   }
+
+  const today = todayStr(user.timezone);
+  const takenToday = await checkSupplementToday(telegramId, today);
+  const { current, longest } = await getSupplementStreak(telegramId);
   const msg = formatCycleMessage(user.ekstrajenStartDate);
-  await ctx.reply(msg, {
+
+  const streakLine = current > 0
+    ? `\n\n💊 Streak: ${current} day${current === 1 ? "" : "s"}${current >= 7 ? " 🔥" : current >= 3 ? " ⚡" : ""} | Longest: ${longest}`
+    : "";
+
+  const statusLine = takenToday ? "\n\n✅ *Taken today!*" : "\n\n⬜ *Not taken yet today*";
+
+  const buttons = [];
+  if (!takenToday) {
+    buttons.push([Markup.button.callback("💊 Mark as taken today", "supplement_taken")]);
+  }
+  buttons.push([Markup.button.callback("🔄 Reset Cycle", "confirm_reset_cycle")]);
+
+  await ctx.reply(msg + statusLine + streakLine, {
+    parse_mode: "Markdown",
+    ...Markup.inlineKeyboard(buttons),
+  });
+}
+
+bot.hears("💊 Daily Supplement", async (ctx): Promise<void> => {
+  await sendSupplementStatus(ctx, String(ctx.from.id));
+});
+
+bot.action("supplement_taken", async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const user = await getUser(id);
+  const today = todayStr(user?.timezone);
+  const marked = await markSupplementTaken(id, today);
+  await ctx.answerCbQuery(marked ? "✅ Logged! Well done!" : "Already marked for today.");
+
+  if (!user?.ekstrajenStartDate) return;
+
+  const { current, longest } = await getSupplementStreak(id);
+  const msg = formatCycleMessage(user.ekstrajenStartDate);
+  const streakLine = current > 0
+    ? `\n\n💊 Streak: ${current} day${current === 1 ? "" : "s"}${current >= 7 ? " 🔥" : current >= 3 ? " ⚡" : ""} | Longest: ${longest}`
+    : "";
+
+  await ctx.editMessageText(msg + "\n\n✅ *Taken today!*" + streakLine, {
     parse_mode: "Markdown",
     ...Markup.inlineKeyboard([[Markup.button.callback("🔄 Reset Cycle", "confirm_reset_cycle")]]),
   });

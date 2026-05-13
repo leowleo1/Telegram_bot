@@ -1,4 +1,4 @@
-import { db, usersTable, habitsTable, completionsTable } from "@workspace/db";
+import { db, usersTable, habitsTable, completionsTable, supplementCheckinsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 
 export async function getOrCreateUser(telegramId: string, username?: string) {
@@ -131,6 +131,58 @@ export async function getStreakStats(habitId: number, telegramId: string): Promi
       } else {
         running = 1;
       }
+    }
+    if (running > longest) longest = running;
+  }
+
+  return { current, longest: Math.max(current, longest) };
+}
+
+export async function checkSupplementToday(telegramId: string, date: string): Promise<boolean> {
+  const rows = await db
+    .select()
+    .from(supplementCheckinsTable)
+    .where(and(eq(supplementCheckinsTable.telegramId, telegramId), eq(supplementCheckinsTable.checkinDate, date)))
+    .limit(1);
+  return rows.length > 0;
+}
+
+export async function markSupplementTaken(telegramId: string, date: string): Promise<boolean> {
+  const already = await checkSupplementToday(telegramId, date);
+  if (already) return false;
+  await db.insert(supplementCheckinsTable).values({ telegramId, checkinDate: date });
+  return true;
+}
+
+export async function getSupplementStreak(telegramId: string): Promise<{ current: number; longest: number }> {
+  const rows = await db
+    .select()
+    .from(supplementCheckinsTable)
+    .where(eq(supplementCheckinsTable.telegramId, telegramId));
+
+  const dates = new Set(rows.map((r) => r.checkinDate));
+  const today = new Date();
+
+  let current = 0;
+  for (let i = 0; i < 90; i++) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    if (dates.has(key)) current++;
+    else break;
+  }
+
+  let longest = 0;
+  let running = 0;
+  const sorted = Array.from(dates).sort();
+  for (let i = 0; i < sorted.length; i++) {
+    if (i === 0) {
+      running = 1;
+    } else {
+      const prev = new Date(sorted[i - 1]!);
+      const curr = new Date(sorted[i]!);
+      const diff = Math.round((curr.getTime() - prev.getTime()) / (1000 * 60 * 60 * 24));
+      running = diff === 1 ? running + 1 : 1;
     }
     if (running > longest) longest = running;
   }
