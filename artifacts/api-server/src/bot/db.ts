@@ -150,6 +150,18 @@ export async function getTodayWater(telegramId: string, date: string): Promise<n
   return rows.reduce((sum, r) => sum + r.amountMl, 0);
 }
 
+export async function undoLastWater(telegramId: string, date: string): Promise<number | null> {
+  const rows = await db
+    .select()
+    .from(waterLogsTable)
+    .where(and(eq(waterLogsTable.telegramId, telegramId), eq(waterLogsTable.logDate, date)))
+    .orderBy(waterLogsTable.createdAt);
+  if (rows.length === 0) return null;
+  const last = rows[rows.length - 1]!;
+  await db.delete(waterLogsTable).where(eq(waterLogsTable.id, last.id));
+  return last.amountMl;
+}
+
 export async function checkSupplementToday(telegramId: string, date: string): Promise<boolean> {
   const rows = await db
     .select()

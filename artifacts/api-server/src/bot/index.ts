@@ -18,6 +18,7 @@ import {
   getSupplementStreak,
   logWater,
   getTodayWater,
+  undoLastWater,
 } from "./db";
 import { formatCycleMessage } from "./ekstrajen";
 import { waterStatusText, getRewardMessage, WATER_GOAL_ML } from "./water";
@@ -59,7 +60,9 @@ function waterButtons(totalMl: number) {
       Markup.button.callback("+500ml", "water_500"),
       Markup.button.callback("✏️ Custom", "water_custom"),
     ],
-    ...(totalMl > 0 ? [[Markup.button.callback("🔄 Refresh", "water_refresh")]] : []),
+    ...(totalMl > 0
+      ? [[Markup.button.callback("↩️ Undo last", "water_undo"), Markup.button.callback("🔄 Refresh", "water_refresh")]]
+      : []),
   ]);
 }
 
@@ -219,6 +222,21 @@ bot.action("water_refresh", async (ctx): Promise<void> => {
   const text = waterStatusText(totalMl, today);
   await ctx.answerCbQuery("Refreshed!");
   await ctx.editMessageText(text, { parse_mode: "Markdown", ...waterButtons(totalMl) });
+});
+
+bot.action("water_undo", async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const user = await getUser(id);
+  const today = todayStr(user?.timezone ?? "UTC");
+  const removed = await undoLastWater(id, today);
+  if (removed === null) {
+    await ctx.answerCbQuery("Nothing to undo!");
+    return;
+  }
+  const newTotal = await getTodayWater(id, today);
+  await ctx.answerCbQuery(`↩️ Removed ${removed}ml`);
+  const text = waterStatusText(newTotal, today);
+  await ctx.editMessageText(text, { parse_mode: "Markdown", ...waterButtons(newTotal) });
 });
 
 bot.action("water_custom", async (ctx): Promise<void> => {
