@@ -9,11 +9,12 @@ import {
   deleteHabit,
   markHabitDone,
   getTodayCompletions,
-  getStreakForHabit,
+  getStreakStats,
   setUserTimezone,
-  setEkstrajenStartDate,
+  setCycleStartDate,
+  resetCycleToToday,
 } from "./db";
-import { getEkstrajenStatus } from "./ekstrajen";
+import { formatCycleMessage } from "./ekstrajen";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) throw new Error("TELEGRAM_BOT_TOKEN is required");
@@ -34,7 +35,7 @@ function mainMenu() {
   return Markup.keyboard([
     ["📋 My Habits", "➕ Add Habit"],
     ["✅ Check Today", "📊 Streaks"],
-    ["🌸 Ekstrajen Cycle", "⚙️ Settings"],
+    ["💊 Daily Supplement", "⚙️ Settings"],
   ]).resize();
 }
 
@@ -53,9 +54,9 @@ bot.help((ctx) =>
       "📋 *My Habits* — view your habit list\n" +
       "➕ *Add Habit* — add a new habit with a reminder time\n" +
       "✅ *Check Today* — mark habits done for today\n" +
-      "📊 *Streaks* — see your current streaks\n" +
-      "🌸 *Ekstrajen Cycle* — view your cycle phase\n" +
-      "⚙️ *Settings* — set timezone or cycle start date",
+      "📊 *Streaks* — current streak + longest ever per habit\n" +
+      "💊 *Daily Supplement* — track your 20-day ON / 10-day break cycle\n" +
+      "⚙️ *Settings* — timezone, cycle start date, delete habits",
     { parse_mode: "Markdown" },
   ),
 );
@@ -96,10 +97,17 @@ bot.hears("✅ Check Today", async (ctx): Promise<void> => {
     Markup.button.callback(doneIds.has(h.id) ? `✅ ${h.name}` : `⬜ ${h.name}`, `toggle_${h.id}`),
   ]);
 
-  await ctx.reply(`*Today's habits* (${today})\n\nTap to check off:`, {
-    parse_mode: "Markdown",
-    ...Markup.inlineKeyboard(buttons),
-  });
+  const completedCount = doneIds.size;
+  const total = habits.length;
+  const bar = buildMiniBar(completedCount, total);
+
+  await ctx.reply(
+    `*Today's habits* — ${today}\n${bar} ${completedCount}/${total} done\n\nTap to check off:`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard(buttons),
+    },
+  );
 });
 
 bot.action(/^toggle_(\d+)$/, async (ctx): Promise<void> => {
@@ -119,7 +127,18 @@ bot.action(/^toggle_(\d+)$/, async (ctx): Promise<void> => {
   ]);
 
   await ctx.answerCbQuery(marked ? "✅ Marked as done!" : "Already done today!");
-  await ctx.editMessageReplyMarkup(Markup.inlineKeyboard(buttons).reply_markup);
+
+  const completedCount = doneIds.size;
+  const total = habits.length;
+  const bar = buildMiniBar(completedCount, total);
+
+  await ctx.editMessageText(
+    `*Today's habits* — ${today}\n${bar} ${completedCount}/${total} done\n\nTap to check off:`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard(buttons),
+    },
+  );
 });
 
 bot.hears("📊 Streaks", async (ctx): Promise<void> => {
@@ -132,26 +151,55 @@ bot.hears("📊 Streaks", async (ctx): Promise<void> => {
 
   const lines = await Promise.all(
     habits.map(async (h) => {
-      const streak = await getStreakForHabit(h.id, id);
-      const fire = streak >= 7 ? " 🔥" : streak >= 3 ? " ⚡" : "";
-      return `*${h.name}*: ${streak} day${streak === 1 ? "" : "s"}${fire}`;
+      const { current, longest } = await getStreakStats(h.id, id);
+      const fire = current >= 7 ? " 🔥" : current >= 3 ? " ⚡" : "";
+      return `*${h.name}*\n  Current: ${current} day${current === 1 ? "" : "s"}${fire}\n  Longest ever: ${longest} day${longest === 1 ? "" : "s"}`;
     }),
   );
 
-  await ctx.reply(`📊 *Your Streaks*\n\n${lines.join("\n")}`, { parse_mode: "Markdown" });
+  await ctx.reply(`📊 *Streaks*\n\n${lines.join("\n\n")}`, { parse_mode: "Markdown" });
 });
 
-bot.hears("🌸 Ekstrajen Cycle", async (ctx): Promise<void> => {
+bot.hears("💊 Daily Supplement", async (ctx): Promise<void> => {
   const id = String(ctx.from.id);
   const user = await getUser(id);
   if (!user?.ekstrajenStartDate) {
     await ctx.reply(
-      "I don't have your cycle start date yet.\n\nTap ⚙️ Settings → Set Cycle Start Date to configure it.",
+      "I don't have your cycle start date yet.\n\nTap ⚙️ Settings → Set Cycle Start Date to set when you started your course.",
     );
     return;
   }
-  const status = getEkstrajenStatus(user.ekstrajenStartDate);
-  await ctx.reply(status, { parse_mode: "Markdown" });
+  const msg = formatCycleMessage(user.ekstrajenStartDate);
+  await ctx.reply(msg, {
+    parse_mode: "Markdown",
+    ...Markup.inlineKeyboard([[Markup.button.callback("🔄 Reset Cycle", "confirm_reset_cycle")]]),
+  });
+});
+
+bot.action("confirm_reset_cycle", async (ctx): Promise<void> => {
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    "Are you sure you want to reset the cycle to today? This means you're starting a new 90-day course from today.",
+    Markup.inlineKeyboard([
+      [Markup.button.callback("✅ Yes, reset now", "do_reset_cycle")],
+      [Markup.button.callback("❌ Cancel", "cancel_reset")],
+    ]),
+  );
+});
+
+bot.action("do_reset_cycle", async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const user = await getUser(id);
+  const today = await resetCycleToToday(id, user?.timezone ?? "UTC");
+  await ctx.answerCbQuery("Cycle reset!");
+  await ctx.editMessageText(`✅ Cycle reset! New course started on *${today}*.\n\nTap 💊 Daily Supplement to see your status.`, {
+    parse_mode: "Markdown",
+  });
+});
+
+bot.action("cancel_reset", async (ctx): Promise<void> => {
+  await ctx.answerCbQuery("Cancelled.");
+  await ctx.deleteMessage();
 });
 
 bot.hears("⚙️ Settings", async (ctx): Promise<void> => {
@@ -159,7 +207,7 @@ bot.hears("⚙️ Settings", async (ctx): Promise<void> => {
     "⚙️ Settings",
     Markup.inlineKeyboard([
       [Markup.button.callback("🕐 Set Timezone", "settings_timezone")],
-      [Markup.button.callback("🌸 Set Cycle Start Date", "settings_ekstrajen")],
+      [Markup.button.callback("💊 Set Cycle Start Date", "settings_cycle_date")],
       [Markup.button.callback("🗑️ Delete a Habit", "settings_delete")],
     ]),
   );
@@ -175,11 +223,11 @@ bot.action("settings_timezone", async (ctx): Promise<void> => {
   );
 });
 
-bot.action("settings_ekstrajen", async (ctx): Promise<void> => {
+bot.action("settings_cycle_date", async (ctx): Promise<void> => {
   const id = String(ctx.from!.id);
-  userState[id] = { step: "set_ekstrajen_date" };
+  userState[id] = { step: "set_cycle_date" };
   await ctx.answerCbQuery();
-  await ctx.reply("Enter the *start date of your last period* in YYYY-MM-DD format (e.g. 2025-05-01):", {
+  await ctx.reply("Enter the *date you started your supplement course* in YYYY-MM-DD format (e.g. 2025-05-01):", {
     parse_mode: "Markdown",
   });
 });
@@ -248,18 +296,23 @@ bot.on("text", async (ctx): Promise<void> => {
     return;
   }
 
-  if (state.step === "set_ekstrajen_date") {
+  if (state.step === "set_cycle_date") {
     const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
     if (!dateRegex.test(text) || isNaN(Date.parse(text))) {
       await ctx.reply("Please enter a valid date in YYYY-MM-DD format (e.g. 2025-05-01).");
       return;
     }
-    await setEkstrajenStartDate(id, text);
+    await setCycleStartDate(id, text);
     clearState(id);
-    const status = getEkstrajenStatus(text);
-    await ctx.reply(`✅ Cycle start date saved!\n\n${status}`, { parse_mode: "Markdown", ...mainMenu() });
+    const msg = formatCycleMessage(text);
+    await ctx.reply(`✅ Cycle start date saved!\n\n${msg}`, { parse_mode: "Markdown", ...mainMenu() });
   }
 });
+
+function buildMiniBar(done: number, total: number): string {
+  const filled = total > 0 ? Math.round((done / total) * 8) : 0;
+  return "▓".repeat(filled) + "░".repeat(8 - filled);
+}
 
 export function setupReminders(botInstance: Telegraf): void {
   cron.schedule("* * * * *", async () => {

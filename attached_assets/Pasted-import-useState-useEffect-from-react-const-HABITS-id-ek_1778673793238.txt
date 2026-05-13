@@ -1,0 +1,611 @@
+import { useState, useEffect } from "react";
+
+const HABITS = [
+  { id: "ekstrajen", label: "Ekstrajen", sublabel: "daily supplement · 2 caps · 20min before lunch", emoji: "🌸", cycleTracked: true },
+  { id: "morning", label: "Morning stack", sublabel: "vitamins · collagen drink · L-lysine", emoji: "☀️" },
+  { id: "evening", label: "Evening stack", sublabel: "black seed oil · 2–3 caps with dinner", emoji: "🌙" },
+  { id: "skincare", label: "Skincare", sublabel: "niacinamide · gua sha · lip balm", emoji: "✨" },
+  { id: "sleep", label: "Sleep early", sublabel: "wind down by 11pm", emoji: "🌛" },
+];
+
+const getTodayStr = () => new Date().toISOString().split("T")[0];
+
+const greetings = [
+  "you got this today 🌸",
+  "stay consistent, it adds up ✨",
+  "every day counts 💫",
+  "soft and steady wins 🌷",
+  "your future self will thank you 🌙",
+];
+
+export default function HabitTracker() {
+  const [habits, setHabits] = useState({});
+  const [streak, setStreak] = useState({ current: 0, longest: 0 });
+  const [cycleData, setCycleData] = useState(null);
+  const [history, setHistory] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [todayStr] = useState(getTodayStr());
+  const [greeting] = useState(greetings[Math.floor(Math.random() * greetings.length)]);
+  const [justChecked, setJustChecked] = useState(null);
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const todayResult = await window.storage.get("ht:today");
+        if (todayResult) {
+          const parsed = JSON.parse(todayResult.value);
+          if (parsed.date === todayStr) setHabits(parsed.habits || {});
+        }
+        const streakResult = await window.storage.get("ht:streak");
+        if (streakResult) setStreak(JSON.parse(streakResult.value));
+        const cycleResult = await window.storage.get("ht:cycle");
+        if (cycleResult) {
+          setCycleData(JSON.parse(cycleResult.value));
+        } else {
+          const newCycle = { startDate: todayStr };
+          setCycleData(newCycle);
+          await window.storage.set("ht:cycle", JSON.stringify(newCycle));
+        }
+        const histResult = await window.storage.get("ht:history");
+        if (histResult) setHistory(JSON.parse(histResult.value));
+      } catch (e) {}
+      setLoading(false);
+    };
+    load();
+  }, [todayStr]);
+
+  const getCycleInfo = () => {
+    if (!cycleData) return null;
+    const start = new Date(cycleData.startDate);
+    const today = new Date(todayStr);
+    const daysSinceStart = Math.floor((today - start) / 86400000);
+    const CYCLE = 30;
+    const ON = 20;
+    const totalCycleDay = daysSinceStart % CYCLE;
+    const cycleNum = Math.floor(daysSinceStart / CYCLE) + 1;
+    const isOn = totalCycleDay < ON;
+    const dayInPhase = isOn ? totalCycleDay + 1 : totalCycleDay - ON + 1;
+    const phaseTotal = isOn ? ON : 10;
+    const overallProgress = Math.min((daysSinceStart / 90) * 100, 100);
+    return { isOn, dayInPhase, phaseTotal, cycleNum: Math.min(cycleNum, 3), overallProgress, totalDays: daysSinceStart + 1 };
+  };
+
+  const toggleHabit = async (id) => {
+    const newHabits = { ...habits, [id]: !habits[id] };
+    setHabits(newHabits);
+    setJustChecked(id);
+    setTimeout(() => setJustChecked(null), 600);
+    try {
+      await window.storage.set("ht:today", JSON.stringify({ date: todayStr, habits: newHabits }));
+      const newHistory = { ...history, [todayStr]: newHabits };
+      setHistory(newHistory);
+      await window.storage.set("ht:history", JSON.stringify(newHistory));
+      const allDone = HABITS.every((h) => newHabits[h.id]);
+      if (allDone) {
+        const y = new Date(todayStr);
+        y.setDate(y.getDate() - 1);
+        const yStr = y.toISOString().split("T")[0];
+        const yData = newHistory[yStr];
+        const yAllDone = yData && HABITS.every((h) => yData[h.id]);
+        const newCurrent = yAllDone ? streak.current + 1 : 1;
+        const newLongest = Math.max(newCurrent, streak.longest);
+        const s = { current: newCurrent, longest: newLongest };
+        setStreak(s);
+        await window.storage.set("ht:streak", JSON.stringify(s));
+      }
+    } catch (e) {}
+  };
+
+  const getLast21Days = () => {
+    const days = [];
+    for (let i = 20; i >= 0; i--) {
+      const d = new Date(todayStr);
+      d.setDate(d.getDate() - i);
+      const dStr = d.toISOString().split("T")[0];
+      const dayH = dStr === todayStr ? habits : history[dStr] || {};
+      const completed = HABITS.filter((h) => dayH[h.id]).length;
+      days.push({ date: dStr, completed, total: HABITS.length, isToday: dStr === todayStr, label: d.toLocaleDateString("en", { weekday: "short" }).charAt(0) });
+    }
+    return days;
+  };
+
+  const completedToday = HABITS.filter((h) => habits[h.id]).length;
+  const cycleInfo = getCycleInfo();
+  const days = getLast21Days();
+  const progressPct = (completedToday / HABITS.length) * 100;
+
+  const today = new Date(todayStr);
+  const dateLabel = today.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+
+  const fonts = `@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,300;1,400&family=DM+Sans:wght@300;400;500&display=swap');`;
+
+  const styles = `
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #FDF8F5; }
+    .tracker {
+      font-family: 'DM Sans', sans-serif;
+      background: #FDF8F5;
+      min-height: 100vh;
+      max-width: 420px;
+      margin: 0 auto;
+      padding: 0 0 80px 0;
+      color: #3D2B35;
+    }
+    .header {
+      padding: 40px 24px 24px;
+      background: linear-gradient(160deg, #FDF0F5 0%, #F5EEF8 50%, #FDF8F5 100%);
+      border-bottom: 1px solid #F0E6EA;
+    }
+    .date-label {
+      font-family: 'DM Sans', sans-serif;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: #C4A0B8;
+      margin-bottom: 6px;
+    }
+    .main-title {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: 28px;
+      font-weight: 300;
+      color: #3D2B35;
+      line-height: 1.2;
+      margin-bottom: 4px;
+    }
+    .greeting {
+      font-size: 13px;
+      color: #9E7A8A;
+      font-weight: 300;
+    }
+    .progress-bar-wrap {
+      margin: 16px 0 0;
+      background: #EFE4EA;
+      border-radius: 100px;
+      height: 4px;
+      overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      border-radius: 100px;
+      background: linear-gradient(90deg, #E8A0C0, #C4A0D8);
+      transition: width 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    .progress-text {
+      font-size: 12px;
+      color: #B89AAA;
+      margin-top: 6px;
+      font-weight: 400;
+    }
+    .section {
+      padding: 20px 24px 0;
+    }
+    .section-label {
+      font-family: 'DM Sans', sans-serif;
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: 2.5px;
+      text-transform: uppercase;
+      color: #C4A0B8;
+      margin-bottom: 12px;
+    }
+    .cycle-card {
+      background: linear-gradient(135deg, #F8EEFA 0%, #FDE8F2 100%);
+      border-radius: 20px;
+      padding: 18px 20px;
+      border: 1px solid #EDD8F0;
+      margin-bottom: 8px;
+    }
+    .cycle-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 14px;
+    }
+    .cycle-title {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: 18px;
+      font-weight: 400;
+      color: #5A2D6A;
+    }
+    .cycle-subtitle {
+      font-size: 11px;
+      color: #A87ABE;
+      margin-top: 2px;
+    }
+    .cycle-badge {
+      background: white;
+      border-radius: 100px;
+      padding: 4px 12px;
+      font-size: 11px;
+      font-weight: 500;
+      color: #7A4A9A;
+      border: 1px solid #DCC8EC;
+    }
+    .phase-indicator {
+      display: flex;
+      gap: 3px;
+      flex-wrap: wrap;
+    }
+    .phase-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      transition: all 0.3s ease;
+    }
+    .phase-dot.on-active { background: #C47AD8; }
+    .phase-dot.on-past { background: #E8C8F5; }
+    .phase-dot.on-future { background: #F0E0F8; }
+    .phase-dot.break-active { background: #A0C8E8; }
+    .phase-dot.break-past { background: #C8E8F5; }
+    .phase-dot.break-future { background: #E8F4FA; }
+    .phase-labels {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 8px;
+    }
+    .phase-label-text {
+      font-size: 10px;
+      color: #A87ABE;
+      font-weight: 500;
+    }
+    .overall-bar-wrap {
+      margin-top: 10px;
+      background: rgba(255,255,255,0.6);
+      border-radius: 100px;
+      height: 3px;
+    }
+    .overall-bar-fill {
+      height: 100%;
+      border-radius: 100px;
+      background: linear-gradient(90deg, #C47AD8, #A87ABE);
+      transition: width 0.8s ease;
+    }
+    .overall-label {
+      font-size: 10px;
+      color: #A87ABE;
+      margin-top: 4px;
+    }
+    .habits-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .habit-card {
+      background: white;
+      border-radius: 18px;
+      padding: 16px 18px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      border: 1.5px solid #F0E8EC;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+    .habit-card:active {
+      transform: scale(0.97);
+    }
+    .habit-card.done {
+      background: linear-gradient(135deg, #FDF0F8 0%, #F8F0FD 100%);
+      border-color: #E8C8DC;
+    }
+    .habit-card.animating {
+      transform: scale(0.95);
+    }
+    .habit-emoji {
+      font-size: 22px;
+      width: 36px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+    .habit-info { flex: 1; }
+    .habit-name {
+      font-size: 14px;
+      font-weight: 500;
+      color: #3D2B35;
+      margin-bottom: 2px;
+    }
+    .habit-name.done { color: #8A5A7A; }
+    .habit-sub {
+      font-size: 11px;
+      color: #B89AAA;
+      font-weight: 300;
+    }
+    .check-circle {
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      border: 2px solid #E0CED8;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+      background: white;
+    }
+    .check-circle.done {
+      background: linear-gradient(135deg, #E8A0C0, #C8A0E8);
+      border-color: transparent;
+      transform: scale(1.1);
+    }
+    .check-icon {
+      color: white;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .stats-row {
+      display: flex;
+      gap: 10px;
+    }
+    .stat-card {
+      flex: 1;
+      background: white;
+      border-radius: 18px;
+      padding: 16px;
+      border: 1.5px solid #F0E8EC;
+      text-align: center;
+    }
+    .stat-number {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: 36px;
+      font-weight: 300;
+      color: #3D2B35;
+      line-height: 1;
+      margin-bottom: 4px;
+    }
+    .stat-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      color: #C4A0B8;
+      font-weight: 500;
+    }
+    .calendar-wrap {
+      display: flex;
+      gap: 4px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+      scrollbar-width: none;
+    }
+    .calendar-wrap::-webkit-scrollbar { display: none; }
+    .cal-day {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .cal-label {
+      font-size: 9px;
+      color: #C4A0B8;
+      font-weight: 500;
+      text-transform: uppercase;
+    }
+    .cal-dot {
+      width: 28px;
+      height: 28px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 9px;
+      font-weight: 600;
+      transition: all 0.2s;
+    }
+    .cal-dot.none { background: #F5EEF0; color: #D4C0CA; }
+    .cal-dot.partial { background: #FCE8F4; color: #C870A8; }
+    .cal-dot.full { background: linear-gradient(135deg, #E8A0C0, #C8A0E8); color: white; }
+    .cal-dot.today { box-shadow: 0 0 0 2px #E8A0C0; }
+    .reset-btn {
+      background: none;
+      border: 1px solid #EDD8E4;
+      border-radius: 100px;
+      padding: 8px 20px;
+      font-family: 'DM Sans', sans-serif;
+      font-size: 12px;
+      color: #C4A0B8;
+      cursor: pointer;
+      display: block;
+      margin: 0 auto;
+      transition: all 0.2s;
+    }
+    .reset-btn:hover { background: #FDF0F5; color: #9A7A8A; }
+    .all-done-banner {
+      background: linear-gradient(135deg, #F8E8F8, #E8F0F8);
+      border-radius: 16px;
+      padding: 14px 18px;
+      text-align: center;
+      border: 1px solid #E0D0EC;
+      margin-bottom: 8px;
+    }
+    .all-done-text {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: 18px;
+      color: #5A3A6A;
+    }
+  `;
+
+  return (
+    <>
+      <style>{fonts}</style>
+      <style>{styles}</style>
+      <div className="tracker">
+        {/* Header */}
+        <div className="header">
+          <div className="date-label">{dateLabel}</div>
+          <div className="main-title">your routine</div>
+          <div className="greeting">{greeting}</div>
+          <div className="progress-bar-wrap">
+            <div className="progress-bar-fill" style={{ width: `${progressPct}%` }} />
+          </div>
+          <div className="progress-text">{completedToday} of {HABITS.length} done today</div>
+        </div>
+
+        {/* All done banner */}
+        {completedToday === HABITS.length && (
+          <div className="section" style={{ paddingTop: 20 }}>
+            <div className="all-done-banner">
+              <div className="all-done-text">✨ all done for today ✨</div>
+              <div style={{ fontSize: 12, color: '#9A7A9A', marginTop: 4, fontWeight: 300 }}>you're doing amazing</div>
+            </div>
+          </div>
+        )}
+
+        {/* Ekstrajen Cycle Tracker */}
+        {cycleInfo && (
+          <div className="section">
+            <div className="section-label">ekstrajen cycle</div>
+            <div className="cycle-card">
+              <div className="cycle-top">
+                <div>
+                  <div className="cycle-title">
+                    {cycleInfo.isOn ? "taking 🌸" : "rest phase 💤"}
+                  </div>
+                  <div className="cycle-subtitle">
+                    day {cycleInfo.dayInPhase} of {cycleInfo.phaseTotal} · cycle {cycleInfo.cycleNum} of 3
+                  </div>
+                </div>
+                <div className="cycle-badge">
+                  {cycleInfo.isOn ? "on" : "break"}
+                </div>
+              </div>
+
+              {/* ON phase dots (20) */}
+              <div style={{ marginBottom: 6 }}>
+                <div style={{ fontSize: 10, color: '#A87ABE', marginBottom: 5, fontWeight: 500 }}>ON — 20 days</div>
+                <div className="phase-indicator">
+                  {Array.from({ length: 20 }).map((_, i) => {
+                    let cls = "phase-dot ";
+                    if (cycleInfo.isOn) {
+                      if (i < cycleInfo.dayInPhase - 1) cls += "on-past";
+                      else if (i === cycleInfo.dayInPhase - 1) cls += "on-active";
+                      else cls += "on-future";
+                    } else {
+                      cls += "on-past";
+                    }
+                    return <div key={i} className={cls} />;
+                  })}
+                </div>
+              </div>
+
+              {/* BREAK phase dots (10) */}
+              <div>
+                <div style={{ fontSize: 10, color: '#8AB0C8', marginBottom: 5, fontWeight: 500 }}>BREAK — 10 days</div>
+                <div className="phase-indicator">
+                  {Array.from({ length: 10 }).map((_, i) => {
+                    let cls = "phase-dot ";
+                    if (!cycleInfo.isOn) {
+                      if (i < cycleInfo.dayInPhase - 1) cls += "break-past";
+                      else if (i === cycleInfo.dayInPhase - 1) cls += "break-active";
+                      else cls += "break-future";
+                    } else {
+                      cls += "break-future";
+                    }
+                    return <div key={i} className={cls} />;
+                  })}
+                </div>
+              </div>
+
+              {/* Overall course progress */}
+              <div style={{ marginTop: 12 }}>
+                <div className="overall-label">full course progress · day {cycleInfo.totalDays} of 90</div>
+                <div className="overall-bar-wrap">
+                  <div className="overall-bar-fill" style={{ width: `${cycleInfo.overallProgress}%` }} />
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Habits */}
+        <div className="section" style={{ paddingTop: 20 }}>
+          <div className="section-label">today's habits</div>
+          <div className="habits-list">
+            {HABITS.map((habit) => {
+              const done = !!habits[habit.id];
+              const animating = justChecked === habit.id;
+              return (
+                <div
+                  key={habit.id}
+                  className={`habit-card${done ? " done" : ""}${animating ? " animating" : ""}`}
+                  onClick={() => toggleHabit(habit.id)}
+                >
+                  <div className="habit-emoji">{habit.emoji}</div>
+                  <div className="habit-info">
+                    <div className={`habit-name${done ? " done" : ""}`}>{habit.label}</div>
+                    <div className="habit-sub">{habit.sublabel}</div>
+                  </div>
+                  <div className={`check-circle${done ? " done" : ""}`}>
+                    {done && <span className="check-icon">✓</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Stats */}
+        <div className="section" style={{ paddingTop: 20 }}>
+          <div className="section-label">stats</div>
+          <div className="stats-row">
+            <div className="stat-card">
+              <div className="stat-number">{streak.current}</div>
+              <div className="stat-label">day streak</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-number">{streak.longest}</div>
+              <div className="stat-label">longest</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-number">{completedToday}</div>
+              <div className="stat-label">today</div>
+            </div>
+          </div>
+        </div>
+
+        {/* 21-day calendar */}
+        <div className="section" style={{ paddingTop: 20 }}>
+          <div className="section-label">last 21 days</div>
+          <div className="calendar-wrap">
+            {days.map((day) => {
+              let dotClass = "cal-dot none";
+              if (day.completed === day.total) dotClass = "cal-dot full";
+              else if (day.completed > 0) dotClass = "cal-dot partial";
+              if (day.isToday) dotClass += " today";
+              return (
+                <div key={day.date} className="cal-day">
+                  <div className="cal-label">{day.label}</div>
+                  <div className={dotClass}>{day.completed > 0 ? day.completed : ""}</div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ fontSize: 11, color: '#C4A0B8', marginTop: 8, fontWeight: 300 }}>
+            <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 3, background: 'linear-gradient(135deg, #E8A0C0, #C8A0E8)', marginRight: 5, verticalAlign: 'middle' }} />
+            all done
+            <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 3, background: '#FCE8F4', marginLeft: 12, marginRight: 5, verticalAlign: 'middle' }} />
+            partial
+          </div>
+        </div>
+
+        {/* Reset cycle button */}
+        <div className="section" style={{ paddingTop: 24, paddingBottom: 8 }}>
+          <button
+            className="reset-btn"
+            onClick={async () => {
+              if (window.confirm("Reset Ekstrajen cycle to today?")) {
+                const newCycle = { startDate: todayStr };
+                setCycleData(newCycle);
+                try { await window.storage.set("ht:cycle", JSON.stringify(newCycle)); } catch (e) {}
+              }
+            }}
+          >
+            reset ekstrajen cycle
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
