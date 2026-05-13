@@ -21,6 +21,8 @@ import {
   undoLastWater,
   setMorningReminderTime,
   getAllUsersWithMorningReminder,
+  getHabitById,
+  updateHabit,
 } from "./db";
 import { formatCycleMessage, getCycleInfo } from "./ekstrajen";
 import { waterStatusText, getRewardMessage, WATER_GOAL_ML } from "./water";
@@ -32,6 +34,70 @@ if (!token) throw new Error("TELEGRAM_BOT_TOKEN is required");
 export const bot = new Telegraf(token);
 
 const userState: Record<string, { step: string; data?: Record<string, string> }> = {};
+
+const CAT_LABELS: Record<string, string> = {
+  vitamins: "💊 Vitamins",
+  supplements: "🧴 Supplements",
+  activity: "🏃 Activity",
+  wellness: "🧘 Wellness",
+  morning: "☀️ Morning",
+  evening: "🌙 Evening",
+  other: "✨ Other",
+};
+
+const DESC_PRESETS: { key: string; label: string; value: string }[] = [
+  { key: "with_meal", label: "🍽️ With meal", value: "With meal" },
+  { key: "bef_meal", label: "⏰ Before meal (20 min)", value: "20 min before meal" },
+  { key: "aft_meal", label: "🥄 After meal", value: "After meal" },
+  { key: "morning", label: "🌅 In the morning", value: "In the morning" },
+  { key: "bedtime", label: "🌙 At bedtime", value: "At bedtime" },
+  { key: "empty", label: "💧 Empty stomach", value: "On empty stomach" },
+];
+
+function catEmoji(cat: string | null | undefined): string {
+  if (!cat) return "";
+  const entry = CAT_LABELS[cat];
+  return entry ? entry.split(" ")[0]! + " " : "";
+}
+
+function catKeyboard(prefix: string) {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback("💊 Vitamins", `${prefix}vitamins`),
+      Markup.button.callback("🧴 Supplements", `${prefix}supplements`),
+    ],
+    [
+      Markup.button.callback("🏃 Activity", `${prefix}activity`),
+      Markup.button.callback("🧘 Wellness", `${prefix}wellness`),
+    ],
+    [
+      Markup.button.callback("☀️ Morning", `${prefix}morning`),
+      Markup.button.callback("🌙 Evening", `${prefix}evening`),
+    ],
+    [Markup.button.callback("✨ Other", `${prefix}other`)],
+  ]);
+}
+
+function descKeyboard(prefix: string, skipLabel = "⏭️ Skip") {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback("🍽️ With meal", `${prefix}with_meal`),
+      Markup.button.callback("⏰ Before meal (20 min)", `${prefix}bef_meal`),
+    ],
+    [
+      Markup.button.callback("🥄 After meal", `${prefix}aft_meal`),
+      Markup.button.callback("🌅 In the morning", `${prefix}morning`),
+    ],
+    [
+      Markup.button.callback("🌙 At bedtime", `${prefix}bedtime`),
+      Markup.button.callback("💧 Empty stomach", `${prefix}empty`),
+    ],
+    [
+      Markup.button.callback("✏️ Custom note", `${prefix}custom`),
+      Markup.button.callback(skipLabel, `${prefix}skip`),
+    ],
+  ]);
+}
 
 function todayStr(timezone = "UTC"): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: timezone });
@@ -100,7 +166,14 @@ bot.hears("📋 My Habits", async (ctx): Promise<void> => {
     await ctx.reply("You have no habits yet. Tap ➕ Add Habit to get started!");
     return;
   }
-  const lines = habits.map((h, i) => `${i + 1}. *${h.name}* — ⏰ ${h.reminderTime}`).join("\n");
+  const lines = habits
+    .map((h, i) => {
+      const cat = h.category ? `${catEmoji(h.category)}` : "";
+      const catLabel = h.category ? ` _(${CAT_LABELS[h.category] ?? h.category})_` : "";
+      const desc = h.description ? `\n   📝 ${h.description}` : "";
+      return `${i + 1}. ${cat}*${h.name}* — ⏰ ${h.reminderTime}${catLabel}${desc}`;
+    })
+    .join("\n\n");
   await ctx.reply(`Your habits:\n\n${lines}`, { parse_mode: "Markdown" });
 });
 
@@ -350,9 +423,146 @@ bot.hears("⚙️ Settings", async (ctx): Promise<void> => {
       [Markup.button.callback("🕐 Set Timezone", "settings_timezone")],
       [Markup.button.callback("💊 Set Cycle Start Date", "settings_cycle_date")],
       [Markup.button.callback(morningLabel, "settings_morning")],
+      [Markup.button.callback("✏️ Edit a Habit", "settings_edit")],
       [Markup.button.callback("🗑️ Delete a Habit", "settings_delete")],
     ]),
   );
+});
+
+// ─── ADD HABIT: CATEGORY & DESCRIPTION ACTIONS ───────────────────────────────
+
+bot.action(/^hab_cat_(.+)$/, async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const cat = ctx.match[1]!;
+  await ctx.answerCbQuery();
+  const state = userState[id];
+  if (!state) return;
+  userState[id] = { step: "add_habit_desc", data: { ...state.data, category: cat } };
+  const catName = CAT_LABELS[cat] ?? cat;
+  await ctx.editMessageText(
+    `${catName} — got it!\n\nAny notes for this habit? (e.g. timing, how to take it)`,
+    descKeyboard("hab_desc_"),
+  );
+});
+
+bot.action(/^hab_desc_(.+)$/, async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const key = ctx.match[1]!;
+  await ctx.answerCbQuery();
+  const state = userState[id];
+  if (!state) return;
+  if (key === "custom") {
+    userState[id] = { step: "add_habit_desc_custom", data: state.data };
+    await ctx.editMessageText("Type your custom note (e.g. _taken with juice_, _after dinner_):", {
+      parse_mode: "Markdown",
+    });
+    return;
+  }
+  const description = key === "skip" ? null : (DESC_PRESETS.find((d) => d.key === key)?.value ?? null);
+  userState[id] = { step: "add_habit_time", data: { ...state.data, ...(description ? { description } : {}) } };
+  await ctx.editMessageText(
+    `⏰ Almost done! What time should I remind you?\n\nEnter HH:MM (24h), e.g. *08:00*, *20:30*`,
+    { parse_mode: "Markdown" },
+  );
+});
+
+// ─── SETTINGS: EDIT HABIT ────────────────────────────────────────────────────
+
+bot.action("settings_edit", async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const habits = await getUserHabits(id);
+  await ctx.answerCbQuery();
+  if (habits.length === 0) {
+    await ctx.reply("You have no active habits to edit.");
+    return;
+  }
+  const buttons = habits.map((h) => {
+    const label = `${catEmoji(h.category)}${h.name} — ⏰ ${h.reminderTime}`;
+    return [Markup.button.callback(label, `hab_edit_${h.id}`)];
+  });
+  await ctx.reply("Which habit would you like to edit?", Markup.inlineKeyboard(buttons));
+});
+
+bot.action(/^hab_edit_(\d+)$/, async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const habitId = parseInt(ctx.match[1]!);
+  await ctx.answerCbQuery();
+  const habit = await getHabitById(habitId, id);
+  if (!habit) { await ctx.reply("Habit not found."); return; }
+  const catLabel = habit.category ? ` _(${CAT_LABELS[habit.category] ?? habit.category})_` : "";
+  const descLabel = habit.description ? `\n📝 ${habit.description}` : "";
+  await ctx.reply(
+    `✏️ Editing: *${habit.name}*${catLabel}\n⏰ ${habit.reminderTime}${descLabel}\n\nWhat do you want to change?`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("✏️ Name", `habedit_name_${habitId}`), Markup.button.callback("⏰ Time", `habedit_time_${habitId}`)],
+        [Markup.button.callback("🏷️ Category", `habedit_cat_${habitId}`), Markup.button.callback("📝 Note", `habedit_desc_${habitId}`)],
+        [Markup.button.callback("🗑️ Delete this habit", `delete_${habitId}`)],
+      ]),
+    },
+  );
+});
+
+bot.action(/^habedit_name_(\d+)$/, async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const habitId = ctx.match[1]!;
+  userState[id] = { step: "edit_habit_name", data: { habitId } };
+  await ctx.answerCbQuery();
+  await ctx.reply("Enter the new habit name:");
+});
+
+bot.action(/^habedit_time_(\d+)$/, async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const habitId = ctx.match[1]!;
+  userState[id] = { step: "edit_habit_time", data: { habitId } };
+  await ctx.answerCbQuery();
+  await ctx.reply("Enter the new reminder time in HH:MM format (e.g. 08:00):");
+});
+
+bot.action(/^habedit_cat_(\d+)$/, async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const habitId = ctx.match[1]!;
+  await ctx.answerCbQuery();
+  await ctx.reply("Choose the new category:", catKeyboard(`habec_${habitId}_`));
+});
+
+bot.action(/^habec_(\d+)_(.+)$/, async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const habitId = parseInt(ctx.match[1]!);
+  const cat = ctx.match[2]!;
+  await updateHabit(habitId, id, { category: cat });
+  await ctx.answerCbQuery("Category updated!");
+  await ctx.editMessageText(`✅ Category updated to *${CAT_LABELS[cat] ?? cat}*!`, { parse_mode: "Markdown" });
+});
+
+bot.action(/^habedit_desc_(\d+)$/, async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const habitId = ctx.match[1]!;
+  await ctx.answerCbQuery();
+  await ctx.reply("Choose a note or type a custom one:", descKeyboard(`habed_${habitId}_`, "🗑️ Remove note"));
+});
+
+bot.action(/^habed_(\d+)_(.+)$/, async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const habitId = parseInt(ctx.match[1]!);
+  const key = ctx.match[2]!;
+  if (key === "custom") {
+    userState[id] = { step: "edit_habit_desc_custom", data: { habitId: String(habitId) } };
+    await ctx.answerCbQuery();
+    await ctx.editMessageText("Type your custom note:");
+    return;
+  }
+  if (key === "skip") {
+    await updateHabit(habitId, id, { description: null });
+    await ctx.answerCbQuery("Note removed.");
+    await ctx.editMessageText("🗑️ Note removed.");
+    return;
+  }
+  const description = DESC_PRESETS.find((d) => d.key === key)?.value ?? key;
+  await updateHabit(habitId, id, { description });
+  await ctx.answerCbQuery("Note updated!");
+  await ctx.editMessageText(`✅ Note updated to: _${description}_`, { parse_mode: "Markdown" });
 });
 
 bot.action("settings_timezone", async (ctx): Promise<void> => {
@@ -441,11 +651,19 @@ bot.on("text", async (ctx): Promise<void> => {
   const text = ctx.message.text.trim();
 
   if (state.step === "add_habit_name") {
-    userState[id] = { step: "add_habit_time", data: { name: text } };
+    userState[id] = { step: "add_habit_cat", data: { name: text } };
     await ctx.reply(
-      `Great! What time should I remind you to *${text}*?\n\nEnter in HH:MM format (24h), e.g. *08:00*, *20:30*`,
-      { parse_mode: "Markdown" },
+      `Nice! *${text}* — what category fits best?`,
+      { parse_mode: "Markdown", ...catKeyboard("hab_cat_") },
     );
+    return;
+  }
+
+  if (state.step === "add_habit_desc_custom") {
+    userState[id] = { step: "add_habit_time", data: { ...state.data, description: text } };
+    await ctx.reply("⏰ What time should I remind you?\n\nEnter HH:MM (24h), e.g. *08:00*, *20:30*", {
+      parse_mode: "Markdown",
+    });
     return;
   }
 
@@ -456,12 +674,48 @@ bot.on("text", async (ctx): Promise<void> => {
       return;
     }
     const name = state.data?.name ?? "Habit";
-    await addHabit(id, name, text);
+    const category = state.data?.category ?? null;
+    const description = state.data?.description ?? null;
+    await addHabit(id, name, text, category, description);
     clearState(id);
-    await ctx.reply(`✅ Habit *${name}* added with a daily reminder at *${text}*!`, {
+    const catLine = category ? ` _(${CAT_LABELS[category] ?? category})_` : "";
+    const descLine = description ? `\n📝 ${description}` : "";
+    await ctx.reply(`✅ *${name}* added!${catLine}\n⏰ Reminder at *${text}*${descLine}`, {
       parse_mode: "Markdown",
       ...mainMenu(),
     });
+    return;
+  }
+
+  if (state.step === "edit_habit_name") {
+    const habitId = parseInt(state.data?.habitId ?? "0");
+    if (!habitId) { clearState(id); return; }
+    await updateHabit(habitId, id, { name: text });
+    clearState(id);
+    await ctx.reply(`✅ Habit name updated to *${text}*!`, { parse_mode: "Markdown", ...mainMenu() });
+    return;
+  }
+
+  if (state.step === "edit_habit_time") {
+    const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+    if (!timeRegex.test(text)) {
+      await ctx.reply("Please enter a valid time in HH:MM format (e.g. 08:00, 20:30).");
+      return;
+    }
+    const habitId = parseInt(state.data?.habitId ?? "0");
+    if (!habitId) { clearState(id); return; }
+    await updateHabit(habitId, id, { reminderTime: text });
+    clearState(id);
+    await ctx.reply(`✅ Reminder time updated to *${text}*!`, { parse_mode: "Markdown", ...mainMenu() });
+    return;
+  }
+
+  if (state.step === "edit_habit_desc_custom") {
+    const habitId = parseInt(state.data?.habitId ?? "0");
+    if (!habitId) { clearState(id); return; }
+    await updateHabit(habitId, id, { description: text });
+    clearState(id);
+    await ctx.reply(`✅ Note updated to: _${text}_`, { parse_mode: "Markdown", ...mainMenu() });
     return;
   }
 

@@ -71,12 +71,38 @@ export async function getUserHabits(telegramId: string) {
     .where(and(eq(habitsTable.telegramId, telegramId), eq(habitsTable.isActive, true)));
 }
 
-export async function addHabit(telegramId: string, name: string, reminderTime: string) {
+export async function getHabitById(habitId: number, telegramId: string) {
+  const rows = await db
+    .select()
+    .from(habitsTable)
+    .where(and(eq(habitsTable.id, habitId), eq(habitsTable.telegramId, telegramId)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export async function addHabit(
+  telegramId: string,
+  name: string,
+  reminderTime: string,
+  category?: string | null,
+  description?: string | null,
+) {
   const [habit] = await db
     .insert(habitsTable)
-    .values({ telegramId, name, reminderTime })
+    .values({ telegramId, name, reminderTime, category: category ?? null, description: description ?? null })
     .returning();
   return habit!;
+}
+
+export async function updateHabit(
+  habitId: number,
+  telegramId: string,
+  fields: { name?: string; reminderTime?: string; category?: string | null; description?: string | null },
+) {
+  await db
+    .update(habitsTable)
+    .set(fields)
+    .where(and(eq(habitsTable.id, habitId), eq(habitsTable.telegramId, telegramId)));
 }
 
 export async function deleteHabit(habitId: number, telegramId: string) {
