@@ -33,6 +33,21 @@ export async function setUserTimezone(telegramId: string, timezone: string) {
     .where(eq(usersTable.telegramId, telegramId));
 }
 
+export async function setMorningReminderTime(telegramId: string, time: string | null) {
+  await db
+    .update(usersTable)
+    .set({ morningReminderTime: time })
+    .where(eq(usersTable.telegramId, telegramId));
+}
+
+export async function getAllUsersWithMorningReminder() {
+  const { isNotNull } = await import("drizzle-orm");
+  return db
+    .select()
+    .from(usersTable)
+    .where(isNotNull(usersTable.morningReminderTime));
+}
+
 export async function setCycleStartDate(telegramId: string, startDate: string) {
   await db
     .update(usersTable)

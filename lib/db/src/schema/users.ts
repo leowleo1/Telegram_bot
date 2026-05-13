@@ -8,6 +8,7 @@ export const usersTable = pgTable("users", {
   username: text("username"),
   timezone: text("timezone").notNull().default("UTC"),
   ekstrajenStartDate: text("ekstrajen_start_date"),
+  morningReminderTime: text("morning_reminder_time"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

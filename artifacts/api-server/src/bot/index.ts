@@ -19,8 +19,10 @@ import {
   logWater,
   getTodayWater,
   undoLastWater,
+  setMorningReminderTime,
+  getAllUsersWithMorningReminder,
 } from "./db";
-import { formatCycleMessage } from "./ekstrajen";
+import { formatCycleMessage, getCycleInfo } from "./ekstrajen";
 import { waterStatusText, getRewardMessage, WATER_GOAL_ML } from "./water";
 import { buildMonthlyStats } from "./stats";
 
@@ -337,11 +339,17 @@ bot.hears("📊 Monthly Stats", async (ctx): Promise<void> => {
 // ─── SETTINGS ────────────────────────────────────────────────────────────────
 
 bot.hears("⚙️ Settings", async (ctx): Promise<void> => {
+  const id = String(ctx.from.id);
+  const user = await getUser(id);
+  const morningLabel = user?.morningReminderTime
+    ? `🌅 Morning Briefing — ${user.morningReminderTime} ✅`
+    : "🌅 Set Morning Briefing";
   await ctx.reply(
     "⚙️ Settings",
     Markup.inlineKeyboard([
       [Markup.button.callback("🕐 Set Timezone", "settings_timezone")],
       [Markup.button.callback("💊 Set Cycle Start Date", "settings_cycle_date")],
+      [Markup.button.callback(morningLabel, "settings_morning")],
       [Markup.button.callback("🗑️ Delete a Habit", "settings_delete")],
     ]),
   );
@@ -363,6 +371,44 @@ bot.action("settings_cycle_date", async (ctx): Promise<void> => {
   await ctx.reply("Enter the *date you started your supplement course* in YYYY-MM-DD format (e.g. 2025-05-01):", {
     parse_mode: "Markdown",
   });
+});
+
+bot.action("settings_morning", async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const user = await getUser(id);
+  await ctx.answerCbQuery();
+  if (user?.morningReminderTime) {
+    await ctx.reply(
+      `Your morning briefing is set to *${user.morningReminderTime}* every day.\n\nWhat would you like to do?`,
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("✏️ Change time", "morning_set_new")],
+          [Markup.button.callback("🔕 Turn off", "morning_disable")],
+        ]),
+      },
+    );
+  } else {
+    userState[id] = { step: "set_morning_time" };
+    await ctx.reply(
+      "What time should I send your daily briefing?\n\nEnter in HH:MM format (24h), e.g. *08:00*, *07:30*",
+      { parse_mode: "Markdown" },
+    );
+  }
+});
+
+bot.action("morning_set_new", async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  userState[id] = { step: "set_morning_time" };
+  await ctx.answerCbQuery();
+  await ctx.reply("Enter the new time in HH:MM format (e.g. 08:00):", { parse_mode: "Markdown" });
+});
+
+bot.action("morning_disable", async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  await setMorningReminderTime(id, null);
+  await ctx.answerCbQuery("Morning briefing turned off.");
+  await ctx.editMessageText("🔕 Morning briefing disabled. You can turn it back on anytime via ⚙️ Settings.");
 });
 
 bot.action("settings_delete", async (ctx): Promise<void> => {
@@ -444,6 +490,21 @@ bot.on("text", async (ctx): Promise<void> => {
     return;
   }
 
+  if (state.step === "set_morning_time") {
+    const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+    if (!timeRegex.test(text)) {
+      await ctx.reply("Please enter a valid time in HH:MM format (e.g. 08:00, 07:30).");
+      return;
+    }
+    await setMorningReminderTime(id, text);
+    clearState(id);
+    await ctx.reply(
+      `✅ Morning briefing set for *${text}* every day!\n\nI'll send you a daily summary with your habits, water goal, and supplement status.`,
+      { parse_mode: "Markdown", ...mainMenu() },
+    );
+    return;
+  }
+
   if (state.step === "water_custom_amount") {
     const ml = parseInt(text.replace(/[^\d]/g, ""));
     if (isNaN(ml) || ml <= 0 || ml > 5000) {
@@ -479,6 +540,69 @@ function buildMiniBar(done: number, total: number): string {
 }
 
 // ─── REMINDERS ───────────────────────────────────────────────────────────────
+
+async function sendMorningBriefing(botInstance: Telegraf, telegramId: string, timezone: string, cycleStartDate: string | null): Promise<void> {
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: timezone });
+  const { db, habitsTable, completionsTable } = await import("@workspace/db");
+  const { eq, and } = await import("drizzle-orm");
+
+  const habits = await db
+    .select()
+    .from(habitsTable)
+    .where(and(eq(habitsTable.telegramId, telegramId), eq(habitsTable.isActive, true)));
+
+  const done = await db
+    .select()
+    .from(completionsTable)
+    .where(and(eq(completionsTable.telegramId, telegramId), eq(completionsTable.completedDate, today)));
+  const doneIds = new Set(done.map((d) => d.habitId));
+
+  const dayName = new Date().toLocaleDateString("en-US", { weekday: "long", timeZone: timezone });
+  const dateLabel = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", timeZone: timezone });
+
+  const greetings = [
+    "you got this today 🌸",
+    "stay consistent, it adds up ✨",
+    "every day counts 💫",
+    "soft and steady wins 🌷",
+    "your future self will thank you 🌙",
+  ];
+  const greeting = greetings[Math.floor(Math.random() * greetings.length)]!;
+
+  const habitLines = habits.length > 0
+    ? habits.map((h) => `${doneIds.has(h.id) ? "✅" : "⬜"} ${h.name}`).join("\n")
+    : "_No habits set up yet_";
+
+  let supplementLine = "";
+  if (cycleStartDate) {
+    const info = getCycleInfo(cycleStartDate);
+    if (!info.courseDone) {
+      supplementLine = info.isOn
+        ? `\n\n💊 *Supplement* — ON phase, Day ${info.dayInPhase}/${info.phaseTotal} (Cycle ${info.cycleNum}/3)`
+        : `\n\n☕ *Supplement* — Break phase, Day ${info.dayInPhase}/${info.phaseTotal}`;
+    }
+  }
+
+  const lines = [
+    `🌅 *Good morning! ${dayName}, ${dateLabel}*`,
+    `_${greeting}_`,
+    ``,
+    `📋 *Today's habits:*`,
+    habitLines,
+    ``,
+    `💧 *Water goal:* 2,000ml — let's get hydrated!`,
+    supplementLine,
+  ].join("\n");
+
+  const buttons = habits.length > 0
+    ? [habits.slice(0, 4).map((h) => Markup.button.callback(doneIds.has(h.id) ? `✅ ${h.name}` : `⬜ ${h.name}`, `toggle_${h.id}`))]
+    : [];
+
+  await botInstance.telegram.sendMessage(telegramId, lines, {
+    parse_mode: "Markdown",
+    ...(buttons.length > 0 ? Markup.inlineKeyboard(buttons) : {}),
+  });
+}
 
 export function setupReminders(botInstance: Telegraf): void {
   cron.schedule("* * * * *", async () => {
@@ -533,6 +657,25 @@ export function setupReminders(botInstance: Telegraf): void {
                 ]),
               },
             );
+          }
+        }
+      }
+      // Morning briefing
+      const usersWithMorning = await getAllUsersWithMorningReminder();
+      for (const user of usersWithMorning) {
+        if (!user.morningReminderTime) continue;
+        const tz = user.timezone ?? "UTC";
+        const localTime = now.toLocaleTimeString("en-GB", {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+          timeZone: tz,
+        });
+        if (localTime === user.morningReminderTime) {
+          try {
+            await sendMorningBriefing(botInstance, user.telegramId, tz, user.ekstrajenStartDate ?? null);
+          } catch (err) {
+            logger.error({ err, telegramId: user.telegramId }, "Failed to send morning briefing");
           }
         }
       }
