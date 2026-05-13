@@ -218,8 +218,7 @@ bot.action("settings_timezone", async (ctx): Promise<void> => {
   userState[id] = { step: "set_timezone" };
   await ctx.answerCbQuery();
   await ctx.reply(
-    "Enter your timezone (e.g. *Europe/Istanbul*, *America/New_York*, *Asia/Tokyo*).\n\nSee full list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones",
-    { parse_mode: "Markdown" },
+    "Enter your timezone (e.g. Europe/Istanbul, America/New_York, Asia/Tokyo).\n\nFull list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones",
   );
 });
 
