@@ -539,6 +539,33 @@ function buildMiniBar(done: number, total: number): string {
   return "▓".repeat(filled) + "░".repeat(8 - filled);
 }
 
+// ─── STICKER HANDLER ─────────────────────────────────────────────────────────
+
+const STICKER_PACKS = ["STrAYKiDs_best", "moodmorsh_by_fStikBot"];
+let cachedStickerFileIds: string[] = [];
+
+async function getStickerPool(botInstance: Telegraf): Promise<string[]> {
+  if (cachedStickerFileIds.length > 0) return cachedStickerFileIds;
+  const ids: string[] = [];
+  for (const pack of STICKER_PACKS) {
+    try {
+      const set = await botInstance.telegram.getStickerSet(pack);
+      for (const s of set.stickers) ids.push(s.file_id);
+    } catch (err) {
+      logger.warn({ err, pack }, "Could not load sticker pack");
+    }
+  }
+  cachedStickerFileIds = ids;
+  return ids;
+}
+
+bot.on("sticker", async (ctx): Promise<void> => {
+  const pool = await getStickerPool(bot);
+  if (pool.length === 0) return;
+  const pick = pool[Math.floor(Math.random() * pool.length)]!;
+  await ctx.replyWithSticker(pick);
+});
+
 // ─── REMINDERS ───────────────────────────────────────────────────────────────
 
 async function sendMorningBriefing(botInstance: Telegraf, telegramId: string, timezone: string, cycleStartDate: string | null): Promise<void> {
