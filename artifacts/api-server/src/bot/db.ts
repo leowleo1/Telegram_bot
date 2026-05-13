@@ -1,5 +1,5 @@
-import { db, usersTable, habitsTable, completionsTable, supplementCheckinsTable } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
+import { db, usersTable, habitsTable, completionsTable, supplementCheckinsTable, waterLogsTable } from "@workspace/db";
+import { eq, and, gte, lte } from "drizzle-orm";
 
 export async function getOrCreateUser(telegramId: string, username?: string) {
   const existing = await db
@@ -136,6 +136,18 @@ export async function getStreakStats(habitId: number, telegramId: string): Promi
   }
 
   return { current, longest: Math.max(current, longest) };
+}
+
+export async function logWater(telegramId: string, amountMl: number, date: string): Promise<void> {
+  await db.insert(waterLogsTable).values({ telegramId, amountMl, logDate: date });
+}
+
+export async function getTodayWater(telegramId: string, date: string): Promise<number> {
+  const rows = await db
+    .select()
+    .from(waterLogsTable)
+    .where(and(eq(waterLogsTable.telegramId, telegramId), eq(waterLogsTable.logDate, date)));
+  return rows.reduce((sum, r) => sum + r.amountMl, 0);
 }
 
 export async function checkSupplementToday(telegramId: string, date: string): Promise<boolean> {
