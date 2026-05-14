@@ -23,10 +23,17 @@ import {
   getAllUsersWithMorningReminder,
   getHabitById,
   updateHabit,
+  setEveningNudgeTime,
+  getAllUsersWithEveningNudge,
+  getAllUsers,
+  pauseHabit,
+  resumeHabit,
 } from "./db";
 import { formatCycleMessage, getCycleInfo } from "./ekstrajen";
 import { waterStatusText, getRewardMessage, WATER_GOAL_ML } from "./water";
 import { buildMonthlyStats } from "./stats";
+import { buildWeeklyWrapup, isSundayEvening } from "./weekly";
+import { getMilestoneMessage, pickNudgeMessage, pickMissMessage, HAPPY_EMOJIS, SAD_EMOJIS } from "./messages";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) throw new Error("TELEGRAM_BOT_TOKEN is required");
@@ -166,12 +173,15 @@ bot.hears("📋 My Habits", async (ctx): Promise<void> => {
     await ctx.reply("You have no habits yet. Tap ➕ Add Habit to get started!");
     return;
   }
+  const today = todayStr();
   const lines = habits
     .map((h, i) => {
       const cat = h.category ? `${catEmoji(h.category)}` : "";
       const catLabel = h.category ? ` _(${CAT_LABELS[h.category] ?? h.category})_` : "";
       const desc = h.description ? `\n   📝 ${h.description}` : "";
-      return `${i + 1}. ${cat}*${h.name}* — ⏰ ${h.reminderTime}${catLabel}${desc}`;
+      const paused = h.pausedUntil && h.pausedUntil >= today ? `\n   ⏸️ _Paused until ${h.pausedUntil}_` : "";
+      const times = [h.reminderTime, h.reminderTime2, h.reminderTime3].filter(Boolean).join(", ");
+      return `${i + 1}. ${cat}*${h.name}* — ⏰ ${times}${catLabel}${desc}${paused}`;
     })
     .join("\n\n");
   await ctx.reply(`Your habits:\n\n${lines}`, { parse_mode: "Markdown" });
@@ -229,6 +239,16 @@ bot.action(/^toggle_(\d+)$/, async (ctx): Promise<void> => {
     `*Today's habits* — ${today}\n${bar} ${completedCount}/${total} done\n\nTap to check off:`,
     { parse_mode: "Markdown", ...Markup.inlineKeyboard(buttons) },
   );
+
+  if (marked) {
+    const { current } = await getStreakStats(habitId, id);
+    const milestone = getMilestoneMessage(current);
+    if (milestone) {
+      const habit = habits.find((h) => h.id === habitId);
+      await ctx.reply(`🎉 *${habit?.name ?? "Habit"} streak milestone!*\n\n${milestone}`, { parse_mode: "Markdown" });
+      await sendSticker(bot, id, HAPPY_EMOJIS);
+    }
+  }
 });
 
 // ─── STREAKS ─────────────────────────────────────────────────────────────────
@@ -417,12 +437,17 @@ bot.hears("⚙️ Settings", async (ctx): Promise<void> => {
   const morningLabel = user?.morningReminderTime
     ? `🌅 Morning Briefing — ${user.morningReminderTime} ✅`
     : "🌅 Set Morning Briefing";
+  const nudgeLabel = user?.eveningNudgeTime
+    ? `🌙 Evening Nudge — ${user.eveningNudgeTime} ✅`
+    : "🌙 Set Evening Nudge";
   await ctx.reply(
     "⚙️ Settings",
     Markup.inlineKeyboard([
       [Markup.button.callback("🕐 Set Timezone", "settings_timezone")],
       [Markup.button.callback("💊 Set Cycle Start Date", "settings_cycle_date")],
       [Markup.button.callback(morningLabel, "settings_morning")],
+      [Markup.button.callback(nudgeLabel, "settings_nudge")],
+      [Markup.button.callback("⏸️ Pause a Habit", "settings_pause")],
       [Markup.button.callback("✏️ Edit a Habit", "settings_edit")],
       [Markup.button.callback("🗑️ Delete a Habit", "settings_delete")],
     ]),
@@ -491,12 +516,14 @@ bot.action(/^hab_edit_(\d+)$/, async (ctx): Promise<void> => {
   if (!habit) { await ctx.reply("Habit not found."); return; }
   const catLabel = habit.category ? ` _(${CAT_LABELS[habit.category] ?? habit.category})_` : "";
   const descLabel = habit.description ? `\n📝 ${habit.description}` : "";
+  const times = [habit.reminderTime, habit.reminderTime2, habit.reminderTime3].filter(Boolean).join(", ");
   await ctx.reply(
-    `✏️ Editing: *${habit.name}*${catLabel}\n⏰ ${habit.reminderTime}${descLabel}\n\nWhat do you want to change?`,
+    `✏️ Editing: *${habit.name}*${catLabel}\n⏰ ${times}${descLabel}\n\nWhat do you want to change?`,
     {
       parse_mode: "Markdown",
       ...Markup.inlineKeyboard([
-        [Markup.button.callback("✏️ Name", `habedit_name_${habitId}`), Markup.button.callback("⏰ Time", `habedit_time_${habitId}`)],
+        [Markup.button.callback("✏️ Name", `habedit_name_${habitId}`), Markup.button.callback("⏰ Time 1", `habedit_time_${habitId}`)],
+        [Markup.button.callback("⏰ Time 2", `habedit_time2_${habitId}`), Markup.button.callback("⏰ Time 3", `habedit_time3_${habitId}`)],
         [Markup.button.callback("🏷️ Category", `habedit_cat_${habitId}`), Markup.button.callback("📝 Note", `habedit_desc_${habitId}`)],
         [Markup.button.callback("🗑️ Delete this habit", `delete_${habitId}`)],
       ]),
@@ -565,6 +592,88 @@ bot.action(/^habed_(\d+)_(.+)$/, async (ctx): Promise<void> => {
   await ctx.editMessageText(`✅ Note updated to: _${description}_`, { parse_mode: "Markdown" });
 });
 
+// ─── EXTRA REMINDER TIMES ────────────────────────────────────────────────────
+
+bot.action(/^habedit_time2_(\d+)$/, async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const habitId = ctx.match[1]!;
+  userState[id] = { step: "edit_habit_time2", data: { habitId } };
+  await ctx.answerCbQuery();
+  await ctx.reply("Enter the 2nd reminder time in HH:MM format (e.g. 13:00), or type *remove* to clear it:", { parse_mode: "Markdown" });
+});
+
+bot.action(/^habedit_time3_(\d+)$/, async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const habitId = ctx.match[1]!;
+  userState[id] = { step: "edit_habit_time3", data: { habitId } };
+  await ctx.answerCbQuery();
+  await ctx.reply("Enter the 3rd reminder time in HH:MM format (e.g. 20:00), or type *remove* to clear it:", { parse_mode: "Markdown" });
+});
+
+// ─── LEADERBOARD ─────────────────────────────────────────────────────────────
+
+bot.command("leaderboard", async (ctx): Promise<void> => {
+  const id = String(ctx.from.id);
+  const user = await getUser(id);
+  const tz = user?.timezone ?? "UTC";
+  const now = new Date();
+  const today = now.toLocaleDateString("en-CA", { timeZone: tz });
+  const todayDate = new Date(today + "T12:00:00Z");
+  const dayOfWeek = todayDate.getDay();
+  const daysFromMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+  const weekStart = new Date(todayDate);
+  weekStart.setUTCDate(todayDate.getUTCDate() - daysFromMonday);
+  const weekStartStr = weekStart.toISOString().slice(0, 10);
+  const daysElapsed = daysFromMonday + 1;
+
+  const habits = await getUserHabits(id);
+  const { db, completionsTable, waterLogsTable, supplementCheckinsTable } = await import("@workspace/db");
+  const { eq, and, gte, lte } = await import("drizzle-orm");
+
+  const completions = await db.select().from(completionsTable)
+    .where(and(eq(completionsTable.telegramId, id), gte(completionsTable.completedDate, weekStartStr), lte(completionsTable.completedDate, today)));
+  const completionsByHabit: Record<number, number> = {};
+  for (const c of completions) completionsByHabit[c.habitId] = (completionsByHabit[c.habitId] ?? 0) + 1;
+
+  const waterRows = await db.select().from(waterLogsTable)
+    .where(and(eq(waterLogsTable.telegramId, id), gte(waterLogsTable.logDate, weekStartStr), lte(waterLogsTable.logDate, today)));
+  const waterByDay: Record<string, number> = {};
+  for (const r of waterRows) waterByDay[r.logDate] = (waterByDay[r.logDate] ?? 0) + r.amountMl;
+  const waterGoalDays = Object.values(waterByDay).filter((ml) => ml >= WATER_GOAL_ML).length;
+
+  const suppRows = await db.select().from(supplementCheckinsTable)
+    .where(and(eq(supplementCheckinsTable.telegramId, id), gte(supplementCheckinsTable.checkinDate, weekStartStr), lte(supplementCheckinsTable.checkinDate, today)));
+
+  const weekLabel = weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+
+  const lines = [
+    `🏆 *Weekly Stats — Week of ${weekLabel}*`,
+    ``,
+    `💧 Water 2L goal: *${waterGoalDays}/${daysElapsed} days*`,
+    `💊 Supplement: *${suppRows.length}/${daysElapsed} days*`,
+  ];
+
+  if (habits.length > 0) {
+    lines.push(``, `✨ *Habits:*`);
+    for (const h of habits) {
+      const done = completionsByHabit[h.id] ?? 0;
+      const pct = daysElapsed > 0 ? Math.round((done / daysElapsed) * 100) : 0;
+      lines.push(`• *${h.name}*: ${done}/${daysElapsed} days (${pct}%)`);
+    }
+  }
+
+  const bestHabit = habits.reduce<{ name: string; done: number } | null>((best, h) => {
+    const done = completionsByHabit[h.id] ?? 0;
+    return !best || done > best.done ? { name: h.name, done } : best;
+  }, null);
+  if (bestHabit && bestHabit.done > 0) {
+    lines.push(``, `🔥 Best this week: *${bestHabit.name}* (${bestHabit.done} days)`);
+  }
+
+  lines.push(``, `_Tracked by @Leoremindersandtracker_bot_`);
+  await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
+});
+
 bot.action("settings_timezone", async (ctx): Promise<void> => {
   const id = String(ctx.from!.id);
   userState[id] = { step: "set_timezone" };
@@ -619,6 +728,103 @@ bot.action("morning_disable", async (ctx): Promise<void> => {
   await setMorningReminderTime(id, null);
   await ctx.answerCbQuery("Morning briefing turned off.");
   await ctx.editMessageText("🔕 Morning briefing disabled. You can turn it back on anytime via ⚙️ Settings.");
+});
+
+// ─── EVENING NUDGE SETTINGS ───────────────────────────────────────────────────
+
+bot.action("settings_nudge", async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const user = await getUser(id);
+  await ctx.answerCbQuery();
+  if (user?.eveningNudgeTime) {
+    await ctx.reply(
+      `Your evening nudge is set to *${user.eveningNudgeTime}*.\n\nI'll check if any habits are undone and give you a little push 😤`,
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("✏️ Change time", "nudge_set_new")],
+          [Markup.button.callback("🔕 Turn off", "nudge_disable")],
+        ]),
+      },
+    );
+  } else {
+    userState[id] = { step: "set_nudge_time" };
+    await ctx.reply("What time should I nudge you if habits are undone?\n\nEnter HH:MM (24h), e.g. *21:00*, *20:30*", {
+      parse_mode: "Markdown",
+    });
+  }
+});
+
+bot.action("nudge_set_new", async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  userState[id] = { step: "set_nudge_time" };
+  await ctx.answerCbQuery();
+  await ctx.reply("Enter the new nudge time in HH:MM format (e.g. 21:00):");
+});
+
+bot.action("nudge_disable", async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  await setEveningNudgeTime(id, null);
+  await ctx.answerCbQuery("Evening nudge turned off.");
+  await ctx.editMessageText("🔕 Evening nudge disabled. Turn it back on anytime via ⚙️ Settings.");
+});
+
+// ─── PAUSE HABIT ─────────────────────────────────────────────────────────────
+
+bot.action("settings_pause", async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const habits = await getUserHabits(id);
+  await ctx.answerCbQuery();
+  if (habits.length === 0) { await ctx.reply("No habits to pause."); return; }
+  const today = todayStr();
+  const buttons = habits.map((h) => {
+    const isPaused = !!(h.pausedUntil && h.pausedUntil >= today);
+    const label = isPaused ? `▶️ Resume: ${h.name}` : `⏸️ Pause: ${h.name}`;
+    const action = isPaused ? `hab_resume_${h.id}` : `hab_pause_${h.id}`;
+    return [Markup.button.callback(label, action)];
+  });
+  await ctx.reply("Pick a habit to pause or resume:", Markup.inlineKeyboard(buttons));
+});
+
+bot.action(/^hab_pause_(\d+)$/, async (ctx): Promise<void> => {
+  const habitId = parseInt(ctx.match[1]!);
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    "How long should I pause this habit?",
+    Markup.inlineKeyboard([
+      [Markup.button.callback("1 day", `habpause_1d_${habitId}`), Markup.button.callback("3 days", `habpause_3d_${habitId}`)],
+      [Markup.button.callback("7 days", `habpause_7d_${habitId}`), Markup.button.callback("14 days", `habpause_14d_${habitId}`)],
+      [Markup.button.callback("✏️ Custom", `habpause_custom_${habitId}`)],
+    ]),
+  );
+});
+
+bot.action(/^habpause_(\d+)d_(\d+)$/, async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const days = parseInt(ctx.match[1]!);
+  const habitId = parseInt(ctx.match[2]!);
+  const until = new Date();
+  until.setDate(until.getDate() + days);
+  const untilStr = until.toISOString().slice(0, 10);
+  await pauseHabit(habitId, id, untilStr);
+  await ctx.answerCbQuery("Habit paused!");
+  await ctx.editMessageText(`⏸️ Paused for *${days} day${days > 1 ? "s" : ""}* — until ${untilStr}.\n\nReminders will resume automatically after that.`, { parse_mode: "Markdown" });
+});
+
+bot.action(/^habpause_custom_(\d+)$/, async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const habitId = ctx.match[1]!;
+  userState[id] = { step: "pause_habit_days", data: { habitId } };
+  await ctx.answerCbQuery();
+  await ctx.reply("How many days to pause? Enter a number (e.g. 5):");
+});
+
+bot.action(/^hab_resume_(\d+)$/, async (ctx): Promise<void> => {
+  const id = String(ctx.from!.id);
+  const habitId = parseInt(ctx.match[1]!);
+  await resumeHabit(habitId, id);
+  await ctx.answerCbQuery("Habit resumed!");
+  await ctx.editMessageText("▶️ Habit resumed! Reminders will fire again as normal.");
 });
 
 bot.action("settings_delete", async (ctx): Promise<void> => {
@@ -719,6 +925,66 @@ bot.on("text", async (ctx): Promise<void> => {
     return;
   }
 
+  if (state.step === "edit_habit_time2") {
+    const habitId = parseInt(state.data?.habitId ?? "0");
+    if (!habitId) { clearState(id); return; }
+    if (text.toLowerCase() === "remove") {
+      await updateHabit(habitId, id, { reminderTime2: null });
+      clearState(id);
+      await ctx.reply("✅ 2nd reminder removed.", { ...mainMenu() });
+      return;
+    }
+    const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+    if (!timeRegex.test(text)) { await ctx.reply("Enter HH:MM (e.g. 13:00) or 'remove' to clear."); return; }
+    await updateHabit(habitId, id, { reminderTime2: text });
+    clearState(id);
+    await ctx.reply(`✅ 2nd reminder set to *${text}*!`, { parse_mode: "Markdown", ...mainMenu() });
+    return;
+  }
+
+  if (state.step === "edit_habit_time3") {
+    const habitId = parseInt(state.data?.habitId ?? "0");
+    if (!habitId) { clearState(id); return; }
+    if (text.toLowerCase() === "remove") {
+      await updateHabit(habitId, id, { reminderTime3: null });
+      clearState(id);
+      await ctx.reply("✅ 3rd reminder removed.", { ...mainMenu() });
+      return;
+    }
+    const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+    if (!timeRegex.test(text)) { await ctx.reply("Enter HH:MM (e.g. 20:00) or 'remove' to clear."); return; }
+    await updateHabit(habitId, id, { reminderTime3: text });
+    clearState(id);
+    await ctx.reply(`✅ 3rd reminder set to *${text}*!`, { parse_mode: "Markdown", ...mainMenu() });
+    return;
+  }
+
+  if (state.step === "set_nudge_time") {
+    const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+    if (!timeRegex.test(text)) { await ctx.reply("Please enter a valid time in HH:MM format (e.g. 21:00)."); return; }
+    await setEveningNudgeTime(id, text);
+    clearState(id);
+    await ctx.reply(
+      `✅ Evening nudge set for *${text}*!\n\nIf any habits are undone by then, I'll give u a little push 😤`,
+      { parse_mode: "Markdown", ...mainMenu() },
+    );
+    return;
+  }
+
+  if (state.step === "pause_habit_days") {
+    const days = parseInt(text);
+    if (isNaN(days) || days < 1 || days > 365) { await ctx.reply("Enter a number between 1 and 365."); return; }
+    const habitId = parseInt(state.data?.habitId ?? "0");
+    if (!habitId) { clearState(id); return; }
+    const until = new Date();
+    until.setDate(until.getDate() + days);
+    const untilStr = until.toISOString().slice(0, 10);
+    await pauseHabit(habitId, id, untilStr);
+    clearState(id);
+    await ctx.reply(`⏸️ Paused for *${days} day${days > 1 ? "s" : ""}* — until ${untilStr}.`, { parse_mode: "Markdown", ...mainMenu() });
+    return;
+  }
+
   if (state.step === "set_timezone") {
     try {
       Intl.DateTimeFormat(undefined, { timeZone: text });
@@ -795,29 +1061,48 @@ function buildMiniBar(done: number, total: number): string {
 
 // ─── STICKER HANDLER ─────────────────────────────────────────────────────────
 
-const STICKER_PACKS = ["STrAYKiDs_best", "moodmorsh_by_fStikBot"];
-let cachedStickerFileIds: string[] = [];
+const STICKER_PACKS = [
+  "STrAYKiDs_best", "moodmorsh_by_fStikBot",
+  "SKZ_5star_new", "hwanhj_by_fStikBot", "SkzRuvrV",
+  "Forever_loved_ones_by_fStikBot", "straykidshyunjinstickerpack",
+  "txtkku4", "vhhnkko_by_fStikBot", "homelessskids",
+];
 
-async function getStickerPool(botInstance: Telegraf): Promise<string[]> {
-  if (cachedStickerFileIds.length > 0) return cachedStickerFileIds;
-  const ids: string[] = [];
+interface CachedSticker { fileId: string; emoji: string }
+let cachedStickers: CachedSticker[] = [];
+
+async function loadStickerPool(botInstance: Telegraf): Promise<CachedSticker[]> {
+  if (cachedStickers.length > 0) return cachedStickers;
+  const all: CachedSticker[] = [];
   for (const pack of STICKER_PACKS) {
     try {
       const set = await botInstance.telegram.getStickerSet(pack);
-      for (const s of set.stickers) ids.push(s.file_id);
+      for (const s of set.stickers) all.push({ fileId: s.file_id, emoji: s.emoji ?? "" });
     } catch (err) {
       logger.warn({ err, pack }, "Could not load sticker pack");
     }
   }
-  cachedStickerFileIds = ids;
-  return ids;
+  cachedStickers = all;
+  return all;
+}
+
+async function pickSticker(botInstance: Telegraf, filter?: Set<string>): Promise<string | null> {
+  const pool = await loadStickerPool(botInstance);
+  const filtered = filter ? pool.filter((s) => filter.has(s.emoji)) : pool;
+  const source = filtered.length > 0 ? filtered : pool;
+  if (source.length === 0) return null;
+  return source[Math.floor(Math.random() * source.length)]!.fileId;
+}
+
+async function sendSticker(botInstance: Telegraf, chatId: string, filter?: Set<string>): Promise<void> {
+  const fileId = await pickSticker(botInstance, filter);
+  if (fileId) await botInstance.telegram.sendSticker(chatId, fileId);
 }
 
 bot.on("sticker", async (ctx): Promise<void> => {
-  const pool = await getStickerPool(bot);
-  if (pool.length === 0) return;
-  const pick = pool[Math.floor(Math.random() * pool.length)]!;
-  await ctx.replyWithSticker(pick);
+  const fileId = await pickSticker(bot);
+  if (!fileId) return;
+  await ctx.replyWithSticker(fileId);
 });
 
 // ─── REMINDERS ───────────────────────────────────────────────────────────────
@@ -897,6 +1182,9 @@ export function setupReminders(botInstance: Telegraf): void {
           habitId: habitsTable.id,
           habitName: habitsTable.name,
           reminderTime: habitsTable.reminderTime,
+          reminderTime2: habitsTable.reminderTime2,
+          reminderTime3: habitsTable.reminderTime3,
+          pausedUntil: habitsTable.pausedUntil,
           telegramId: habitsTable.telegramId,
           timezone: usersTable.timezone,
         })
@@ -941,23 +1229,98 @@ export function setupReminders(botInstance: Telegraf): void {
           }
         }
       }
+      // Extra reminder times (reminderTime2, reminderTime3)
+      for (const habit of habits) {
+        const tz = habit.timezone ?? "UTC";
+        const today = now.toLocaleDateString("en-CA", { timeZone: tz });
+        const localTime = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: tz });
+        for (const extraTime of [habit.reminderTime2, habit.reminderTime3]) {
+          if (!extraTime || localTime !== extraTime) continue;
+          const { db: db2, completionsTable: ct2 } = await import("@workspace/db");
+          const { eq: eq2, and: and2 } = await import("drizzle-orm");
+          const existing2 = await db2.select().from(ct2).where(and2(eq2(ct2.habitId, habit.habitId), eq2(ct2.telegramId, habit.telegramId), eq2(ct2.completedDate, today))).limit(1);
+          if (existing2.length === 0) {
+            await botInstance.telegram.sendMessage(habit.telegramId, `⏰ *Reminder!*\n\nTime to: *${habit.habitName}*\n\nTap below to mark it done!`, {
+              parse_mode: "Markdown",
+              ...Markup.inlineKeyboard([[Markup.button.callback(`✅ Done — ${habit.habitName}`, `toggle_${habit.habitId}`)]]),
+            });
+          }
+        }
+      }
+
       // Morning briefing
       const usersWithMorning = await getAllUsersWithMorningReminder();
       for (const user of usersWithMorning) {
         if (!user.morningReminderTime) continue;
         const tz = user.timezone ?? "UTC";
-        const localTime = now.toLocaleTimeString("en-GB", {
-          hour: "2-digit",
-          minute: "2-digit",
-          hour12: false,
-          timeZone: tz,
-        });
+        const localTime = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: tz });
         if (localTime === user.morningReminderTime) {
           try {
             await sendMorningBriefing(botInstance, user.telegramId, tz, user.ekstrajenStartDate ?? null);
           } catch (err) {
             logger.error({ err, telegramId: user.telegramId }, "Failed to send morning briefing");
           }
+        }
+      }
+
+      // Evening nudge
+      const usersWithNudge = await getAllUsersWithEveningNudge();
+      for (const user of usersWithNudge) {
+        if (!user.eveningNudgeTime) continue;
+        const tz = user.timezone ?? "UTC";
+        const localTime = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: tz });
+        if (localTime !== user.eveningNudgeTime) continue;
+        try {
+          const { db: db3, habitsTable: ht3, completionsTable: ct3 } = await import("@workspace/db");
+          const { eq: eq3, and: and3 } = await import("drizzle-orm");
+          const today = now.toLocaleDateString("en-CA", { timeZone: tz });
+          const activeHabits = await db3.select().from(ht3).where(and3(eq3(ht3.telegramId, user.telegramId), eq3(ht3.isActive, true)));
+          const doneToday = await db3.select().from(ct3).where(and3(eq3(ct3.telegramId, user.telegramId), eq3(ct3.completedDate, today)));
+          const doneIds = new Set(doneToday.map((d) => d.habitId));
+          const undone = activeHabits.filter((h) => !doneIds.has(h.id) && !(h.pausedUntil && h.pausedUntil >= today));
+          if (undone.length === 0) continue;
+          const habitList = undone.map((h) => `⬜ ${h.name}`).join("\n");
+          const msg = pickNudgeMessage();
+          await botInstance.telegram.sendMessage(user.telegramId, `${msg}\n\n${habitList}`, {
+            ...Markup.inlineKeyboard(undone.slice(0, 3).map((h) => [Markup.button.callback(`✅ ${h.name}`, `toggle_${h.id}`)])),
+          });
+        } catch (err) {
+          logger.error({ err, telegramId: user.telegramId }, "Evening nudge failed");
+        }
+      }
+
+      // Midnight miss (23:50)
+      const allUsers = await getAllUsers();
+      for (const user of allUsers) {
+        const tz = user.timezone ?? "UTC";
+        const localTime = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: tz });
+        if (localTime !== "23:50") continue;
+        try {
+          const { db: db4, habitsTable: ht4, completionsTable: ct4 } = await import("@workspace/db");
+          const { eq: eq4, and: and4 } = await import("drizzle-orm");
+          const today = now.toLocaleDateString("en-CA", { timeZone: tz });
+          const activeHabits = await db4.select().from(ht4).where(and4(eq4(ht4.telegramId, user.telegramId), eq4(ht4.isActive, true)));
+          const doneToday = await db4.select().from(ct4).where(and4(eq4(ct4.telegramId, user.telegramId), eq4(ct4.completedDate, today)));
+          const doneIds = new Set(doneToday.map((d) => d.habitId));
+          const undone = activeHabits.filter((h) => !doneIds.has(h.id) && !(h.pausedUntil && h.pausedUntil >= today));
+          if (undone.length === 0) continue;
+          await botInstance.telegram.sendMessage(user.telegramId, pickMissMessage());
+          await sendSticker(botInstance, user.telegramId, SAD_EMOJIS);
+        } catch (err) {
+          logger.error({ err, telegramId: user.telegramId }, "Midnight miss check failed");
+        }
+      }
+
+      // Sunday wrap-up (20:00 local time)
+      for (const user of allUsers) {
+        const tz = user.timezone ?? "UTC";
+        if (!isSundayEvening(tz)) continue;
+        try {
+          const summary = await buildWeeklyWrapup(user.telegramId, tz);
+          await botInstance.telegram.sendMessage(user.telegramId, summary, { parse_mode: "Markdown" });
+          await sendSticker(botInstance, user.telegramId, HAPPY_EMOJIS);
+        } catch (err) {
+          logger.error({ err, telegramId: user.telegramId }, "Weekly wrap-up failed");
         }
       }
     } catch (err) {

@@ -7,8 +7,11 @@ export const habitsTable = pgTable("habits", {
   telegramId: text("telegram_id").notNull(),
   name: text("name").notNull(),
   reminderTime: text("reminder_time").notNull(),
+  reminderTime2: text("reminder_time_2"),
+  reminderTime3: text("reminder_time_3"),
   category: text("category"),
   description: text("description"),
+  pausedUntil: text("paused_until"),
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
