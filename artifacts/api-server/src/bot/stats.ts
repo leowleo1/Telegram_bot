@@ -17,16 +17,17 @@ function todayStr(timezone: string): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: timezone });
 }
 
-function daysElapsed(start: string, timezone: string): number {
-  const today = todayStr(timezone);
-  const s = new Date(start);
-  const t = new Date(today);
-  return Math.floor((t.getTime() - s.getTime()) / 86400000) + 1;
+function daysBetween(from: string, to: string): number {
+  return Math.floor((new Date(to).getTime() - new Date(from).getTime()) / 86400000) + 1;
+}
+
+function formatDate(dateStr: string): string {
+  return new Date(dateStr + "T12:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 function motivationalLine(pct: number): string {
   if (pct >= 90) return "🌟 Incredible consistency — you're on fire!";
-  if (pct >= 75) return "💪 Really strong month — keep the momentum!";
+  if (pct >= 75) return "💪 Really strong — keep the momentum!";
   if (pct >= 50) return "📈 Solid progress — more than half the days nailed!";
   if (pct >= 25) return "🌱 You've started — now build on it!";
   return "💫 Every day is a fresh chance — let's go!";
@@ -37,34 +38,54 @@ function pctBar(pct: number, width = 8): string {
   return "▓".repeat(filled) + "░".repeat(width - filled);
 }
 
-export async function buildMonthlyStats(telegramId: string, timezone: string): Promise<string> {
-  const { start, end, label, daysInMonth } = monthBounds(timezone);
+export async function buildMonthlyStats(
+  telegramId: string,
+  timezone: string,
+  cycleStartDate?: string | null,
+): Promise<string> {
+  const { start: monthStart, end: monthEnd, label, daysInMonth } = monthBounds(timezone);
   const today = todayStr(timezone);
-  const elapsed = daysElapsed(start, timezone);
+  const monthElapsed = daysBetween(monthStart, today);
 
-  // --- Supplement ---
+  // --- Supplement: track from cycle start date if available, else from month start ---
+  let suppSectionLabel: string;
+  let suppTrackStart: string;
+
+  if (cycleStartDate && cycleStartDate >= monthStart) {
+    suppTrackStart = cycleStartDate;
+    suppSectionLabel = `since ${formatDate(cycleStartDate)}`;
+  } else if (cycleStartDate && cycleStartDate < monthStart) {
+    suppTrackStart = monthStart;
+    suppSectionLabel = `this month (cycle started ${formatDate(cycleStartDate)})`;
+  } else {
+    suppTrackStart = monthStart;
+    suppSectionLabel = "this month";
+  }
+
+  const suppElapsed = daysBetween(suppTrackStart, today);
+
   const suppRows = await db
     .select()
     .from(supplementCheckinsTable)
     .where(
       and(
         eq(supplementCheckinsTable.telegramId, telegramId),
-        gte(supplementCheckinsTable.checkinDate, start),
+        gte(supplementCheckinsTable.checkinDate, suppTrackStart),
         lte(supplementCheckinsTable.checkinDate, today),
       ),
     );
   const suppDays = suppRows.length;
-  const suppSkipped = elapsed - suppDays;
-  const suppPct = elapsed > 0 ? Math.round((suppDays / elapsed) * 100) : 0;
+  const suppSkipped = Math.max(0, suppElapsed - suppDays);
+  const suppPct = suppElapsed > 0 ? Math.round((suppDays / suppElapsed) * 100) : 0;
 
-  // --- Water ---
+  // --- Water: always this month ---
   const waterRows = await db
     .select()
     .from(waterLogsTable)
     .where(
       and(
         eq(waterLogsTable.telegramId, telegramId),
-        gte(waterLogsTable.logDate, start),
+        gte(waterLogsTable.logDate, monthStart),
         lte(waterLogsTable.logDate, today),
       ),
     );
@@ -77,9 +98,9 @@ export async function buildMonthlyStats(telegramId: string, timezone: string): P
   const waterDaysGoalHit = Object.values(waterByDay).filter((ml) => ml >= WATER_GOAL_ML).length;
   const totalWaterMl = Object.values(waterByDay).reduce((a, b) => a + b, 0);
   const avgWater = waterDaysLogged > 0 ? Math.round(totalWaterMl / waterDaysLogged) : 0;
-  const waterPct = elapsed > 0 ? Math.round((waterDaysGoalHit / elapsed) * 100) : 0;
+  const waterPct = monthElapsed > 0 ? Math.round((waterDaysGoalHit / monthElapsed) * 100) : 0;
 
-  // --- Habits ---
+  // --- Habits: always this month ---
   const habits = await db
     .select()
     .from(habitsTable)
@@ -94,14 +115,14 @@ export async function buildMonthlyStats(telegramId: string, timezone: string): P
         and(
           eq(completionsTable.telegramId, telegramId),
           eq(completionsTable.habitId, habit.id),
-          gte(completionsTable.completedDate, start),
+          gte(completionsTable.completedDate, monthStart),
           lte(completionsTable.completedDate, today),
         ),
       );
     const done = rows.length;
-    const pct = elapsed > 0 ? Math.round((done / elapsed) * 100) : 0;
+    const pct = monthElapsed > 0 ? Math.round((done / monthElapsed) * 100) : 0;
     const bar = pctBar(pct, 6);
-    habitLines.push(`${bar} *${habit.name}*: ${done}/${elapsed} days (${pct}%)`);
+    habitLines.push(`${bar} *${habit.name}*: ${done}/${monthElapsed} days (${pct}%)`);
   }
 
   const overallPct = Math.round((suppPct + waterPct) / 2);
@@ -109,13 +130,13 @@ export async function buildMonthlyStats(telegramId: string, timezone: string): P
 
   const lines = [
     `📊 *${label} Stats*`,
-    `_${elapsed} of ${daysInMonth} days tracked_`,
+    `_${monthElapsed} of ${daysInMonth} days into the month_`,
     ``,
-    `💊 *Daily Supplement*`,
+    `💊 *Daily Supplement* — _${suppSectionLabel}_`,
     `${pctBar(suppPct)} ${suppPct}%`,
     `✅ Taken: ${suppDays} days  ❌ Skipped: ${suppSkipped} days`,
     ``,
-    `💧 *Water (2L goal)*`,
+    `💧 *Water (2L goal)* — _this month_`,
     `${pctBar(waterPct)} ${waterPct}% of days hit goal`,
     `🏆 Goal hit: ${waterDaysGoalHit} days  📊 Avg: ${avgWater}ml/day`,
     ...(waterDaysLogged === 0 ? [`_No water logged yet this month_`] : []),
@@ -123,7 +144,7 @@ export async function buildMonthlyStats(telegramId: string, timezone: string): P
   ];
 
   if (habitLines.length > 0) {
-    lines.push(`✨ *Habits*`);
+    lines.push(`✨ *Habits* — _this month_`);
     lines.push(...habitLines);
     lines.push(``);
   }

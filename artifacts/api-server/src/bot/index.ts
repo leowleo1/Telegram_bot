@@ -405,7 +405,7 @@ bot.hears("📊 Monthly Stats", async (ctx): Promise<void> => {
   const id = String(ctx.from.id);
   const user = await getUser(id);
   await ctx.reply("Building your monthly report...");
-  const stats = await buildMonthlyStats(id, user?.timezone ?? "UTC");
+  const stats = await buildMonthlyStats(id, user?.timezone ?? "UTC", user?.ekstrajenStartDate ?? null);
   await ctx.reply(stats, { parse_mode: "Markdown" });
 });
 
